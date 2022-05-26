@@ -151,7 +151,7 @@ static s32 forksrv_pid,               /* PID of the fork server           */
            child_pid = -1,            /* PID of the fuzzed program        */
            out_dir_fd = -1;           /* FD of the lock file              */
 
-#define MAX_NUM_COM 100
+#define MAX_NUM_COM 20
 u32 NUM_COM = 5;
 
 static u8 flag_use_output = 0;
@@ -163,7 +163,7 @@ static s32 fsrv_ctl_fd_compiler[MAX_NUM_COM],
            dev_stderr_fd[MAX_NUM_COM],
            dev_output_fd;
 
-static s32 forksrv_fd_compiler = 202;
+static s32 forksrv_fd_compiler = 198;
 
 EXP_ST u8* target_path_compiler[MAX_NUM_COM];
 
@@ -171,6 +171,10 @@ EXP_ST u64  total_diff_compiler;
 EXP_ST u64  unique_diff_compiler;
 
 EXP_ST u8  virgin_diff[MAP_SIZE];
+EXP_ST u8* diff_trace_bits[MAX_NUM_COM];                /* SHM with instrumentation bitmap  */
+static s32 diff_shm_id[MAX_NUM_COM];                    /* ID of the SHM region             */
+EXP_ST u8  diff_virgin_bits[MAX_NUM_COM][MAP_SIZE];     /* Regions yet untouched by fuzzing */
+static FILE* diff_log_file;
 
 
 EXP_ST u8* trace_bits;                /* SHM with instrumentation bitmap  */
@@ -358,7 +362,8 @@ enum {
   /* 02 */ FAULT_CRASH,
   /* 03 */ FAULT_ERROR,
   /* 04 */ FAULT_NOINST,
-  /* 05 */ FAULT_NOBITS
+  /* 05 */ FAULT_NOBITS,
+  /* 06 */ FAULT_DIFF
 };
 
 
@@ -997,6 +1002,73 @@ static inline u8 has_new_bits(u8* virgin_map) {
 
 }
 
+static inline u8 diff_has_new_bits(u8* diff_virgin, u8* diff_trace) {
+
+#ifdef WORD_SIZE_64
+
+  u64* current = (u64*)diff_trace;
+  u64* virgin  = (u64*)diff_virgin;
+
+  u32  i = (MAP_SIZE >> 3);
+
+#else
+
+  u32* current = (u32*)diff_trace;
+  u32* virgin  = (u32*)diff_virgin;
+
+  u32  i = (MAP_SIZE >> 2);
+
+#endif /* ^WORD_SIZE_64 */
+
+  u8   ret = 0;
+
+  while (i--) {
+
+    /* Optimize for (*current & *virgin) == 0 - i.e., no bits in current bitmap
+       that have not been already cleared from the virgin map - since this will
+       almost always be the case. */
+
+    if (unlikely(*current) && unlikely(*current & *virgin)) {
+
+      if (likely(ret < 2)) {
+
+        u8* cur = (u8*)current;
+        u8* vir = (u8*)virgin;
+
+        /* Looks like we have not found any new bytes yet; see if any non-zero
+           bytes in current[] are pristine in virgin[]. */
+
+#ifdef WORD_SIZE_64
+
+        if ((cur[0] && vir[0] == 0xff) || (cur[1] && vir[1] == 0xff) ||
+            (cur[2] && vir[2] == 0xff) || (cur[3] && vir[3] == 0xff) ||
+            (cur[4] && vir[4] == 0xff) || (cur[5] && vir[5] == 0xff) ||
+            (cur[6] && vir[6] == 0xff) || (cur[7] && vir[7] == 0xff)) ret = 2;
+        else ret = 1;
+
+#else
+
+        if ((cur[0] && vir[0] == 0xff) || (cur[1] && vir[1] == 0xff) ||
+            (cur[2] && vir[2] == 0xff) || (cur[3] && vir[3] == 0xff)) ret = 2;
+        else ret = 1;
+
+#endif /* ^WORD_SIZE_64 */
+
+      }
+
+      *virgin &= ~*current;
+
+    }
+
+    current++;
+    virgin++;
+
+  }
+
+  return ret;
+
+}
+
 
 /* Count the number of bits set in the provided bitmap. Used for the status
    screen several times every second, does not have to be fast. */
@@ -1254,6 +1326,9 @@ static inline void classify_counts(u32* mem) {
 static void remove_shm(void) {
 
   shmctl(shm_id, IPC_RMID, NULL);
+  for (int idx_com=1; idx_com < NUM_COM; idx_com++) {
+    shmctl(diff_shm_id[idx_com], IPC_RMID, NULL);
+  }
 
 }
 
@@ -1406,8 +1481,6 @@ EXP_ST void setup_shm(void) {
 
   if (shm_id < 0) PFATAL("shmget() failed");
 
-  atexit(remove_shm);
-
   shm_str = alloc_printf("%d", shm_id);
 
   /* If somebody is asking us to fuzz instrumented binaries in dumb mode,
@@ -1415,13 +1488,35 @@ EXP_ST void setup_shm(void) {
      fork server commands. This should be replaced with better auto-detection
      later on, perhaps? */
 
-  if (!dumb_mode) setenv(SHM_ENV_VAR, shm_str, 1);
+  if (!dumb_mode) setenv(alloc_printf("%s_%d", SHM_ENV_VAR, 0), shm_str, 1);
 
   ck_free(shm_str);
 
   trace_bits = shmat(shm_id, NULL, 0);
   
   if (trace_bits == (void *)-1) PFATAL("shmat() failed");
+
+  // setup for diff_compilers
+  diff_shm_id[0] = shm_id;
+  diff_trace_bits[0] = trace_bits;
+  for (int idx_com=1; idx_com < NUM_COM; idx_com++) {
+    if (!in_bitmap) memset(diff_virgin_bits[idx_com], 255, MAP_SIZE);
+    diff_shm_id[idx_com] = shmget(IPC_PRIVATE, MAP_SIZE, IPC_CREAT | IPC_EXCL | 0600);
+
+    if (diff_shm_id[idx_com] < 0) PFATAL("shmget() failed");
+
+    shm_str = alloc_printf("%d", diff_shm_id[idx_com]);
+
+    if (!dumb_mode) setenv(alloc_printf("%s_%d", SHM_ENV_VAR, idx_com), shm_str, 1);
+
+    ck_free(shm_str);
+
+    diff_trace_bits[idx_com] = shmat(diff_shm_id[idx_com], NULL, 0);
+    
+    if (diff_trace_bits[idx_com] == (void *)-1) PFATAL("shmat() failed"); 
+  }
+
+  atexit(remove_shm);
 
 }
 
@@ -2432,6 +2527,7 @@ EXP_ST void init_forkserver_compiler(char** argv, u32 idx_compiler) {
     /* Use a distinctive bitmap signature to tell the parent about execv()
        falling through. */
 
+    *(u32*)diff_trace_bits[idx_compiler] = EXEC_FAIL_SIG;
     exit(0);
 
   }
@@ -2473,6 +2569,122 @@ EXP_ST void init_forkserver_compiler(char** argv, u32 idx_compiler) {
 
   if (waitpid(forksrv_pid_compiler[idx_compiler], &status, 0) <= 0)
     PFATAL("Compiler--waitpid() failed");
+  
+  if (WIFSIGNALED(status)) {
+
+    if (mem_limit && mem_limit < 500 && uses_asan) {
+
+      SAYF("\n" cLRD "[-] " cRST
+           "Whoops, the target binary crashed suddenly, before receiving any input\n"
+           "    from the fuzzer! Since it seems to be built with ASAN and you have a\n"
+           "    restrictive memory limit configured, this is expected; please read\n"
+           "    %s/notes_for_asan.txt for help.\n", doc_path);
+
+    } else if (!mem_limit) {
+
+      SAYF("\n" cLRD "[-] " cRST
+           "Whoops, the target binary crashed suddenly, before receiving any input\n"
+           "    from the fuzzer! There are several probable explanations:\n\n"
+
+           "    - The binary is just buggy and explodes entirely on its own. If so, you\n"
+           "      need to fix the underlying problem or find a better replacement.\n\n"
+
+#ifdef __APPLE__
+
+           "    - On MacOS X, the semantics of fork() syscalls are non-standard and may\n"
+           "      break afl-fuzz performance optimizations when running platform-specific\n"
+           "      targets. To fix this, set AFL_NO_FORKSRV=1 in the environment.\n\n"
+
+#endif /* __APPLE__ */
+
+           "    - Less likely, there is a horrible bug in the fuzzer. If other options\n"
+           "      fail, poke <lcamtuf@coredump.cx> for troubleshooting tips.\n");
+
+    } else {
+
+      SAYF("\n" cLRD "[-] " cRST
+           "Whoops, the target binary crashed suddenly, before receiving any input\n"
+           "    from the fuzzer! There are several probable explanations:\n\n"
+
+           "    - The current memory limit (%s) is too restrictive, causing the\n"
+           "      target to hit an OOM condition in the dynamic linker. Try bumping up\n"
+           "      the limit with the -m setting in the command line. A simple way confirm\n"
+           "      this diagnosis would be:\n\n"
+
+#ifdef RLIMIT_AS
+           "      ( ulimit -Sv $[%llu << 10]; /path/to/fuzzed_app )\n\n"
+#else
+           "      ( ulimit -Sd $[%llu << 10]; /path/to/fuzzed_app )\n\n"
+#endif /* ^RLIMIT_AS */
+
+           "      Tip: you can use http://jwilk.net/software/recidivm to quickly\n"
+           "      estimate the required amount of virtual memory for the binary.\n\n"
+
+           "    - The binary is just buggy and explodes entirely on its own. If so, you\n"
+           "      need to fix the underlying problem or find a better replacement.\n\n"
+
+#ifdef __APPLE__
+
+           "    - On MacOS X, the semantics of fork() syscalls are non-standard and may\n"
+           "      break afl-fuzz performance optimizations when running platform-specific\n"
+           "      targets. To fix this, set AFL_NO_FORKSRV=1 in the environment.\n\n"
+
+#endif /* __APPLE__ */
+
+           "    - Less likely, there is a horrible bug in the fuzzer. If other options\n"
+           "      fail, poke <lcamtuf@coredump.cx> for troubleshooting tips.\n",
+           DMS(mem_limit << 20), mem_limit - 1);
+
+    }
+}
+
+  if (*(u32*)diff_trace_bits[idx_compiler] == EXEC_FAIL_SIG)
+    FATAL("Unable to execute target application ('%s')", argv[0]);
+
+  if (mem_limit && mem_limit < 500 && uses_asan) {
+
+    SAYF("\n" cLRD "[-] " cRST
+           "Hmm, looks like the target binary terminated before we could complete a\n"
+           "    handshake with the injected code. Since it seems to be built with ASAN and\n"
+           "    you have a restrictive memory limit configured, this is expected; please\n"
+           "    read %s/notes_for_asan.txt for help.\n", doc_path);
+
+  } else if (!mem_limit) {
+
+    SAYF("\n" cLRD "[-] " cRST
+         "Hmm, looks like the target binary terminated before we could complete a\n"
+         "    handshake with the injected code. Perhaps there is a horrible bug in the\n"
+         "    fuzzer. Poke <lcamtuf@coredump.cx> for troubleshooting tips.\n");
+
+  } else {
+
+    SAYF("\n" cLRD "[-] " cRST
+         "Hmm, looks like the target binary terminated before we could complete a\n"
+         "    handshake with the injected code. There are %s probable explanations:\n\n"
+
+         "%s"
+         "    - The current memory limit (%s) is too restrictive, causing an OOM\n"
+         "      fault in the dynamic linker. This can be fixed with the -m option. A\n"
+         "      simple way to confirm the diagnosis may be:\n\n"
+
+#ifdef RLIMIT_AS
+         "      ( ulimit -Sv $[%llu << 10]; /path/to/fuzzed_app )\n\n"
+#else
+         "      ( ulimit -Sd $[%llu << 10]; /path/to/fuzzed_app )\n\n"
+#endif /* ^RLIMIT_AS */
+
+         "      Tip: you can use http://jwilk.net/software/recidivm to quickly\n"
+         "      estimate the required amount of virtual memory for the binary.\n\n"
+
+         "    - Less likely, there is a horrible bug in the fuzzer. If other options\n"
+         "      fail, poke <lcamtuf@coredump.cx> for troubleshooting tips.\n",
+         getenv(DEFER_ENV_VAR) ? "three" : "two",
+         getenv(DEFER_ENV_VAR) ?
+         "    - You are using deferred forkserver, but __AFL_INIT() is never\n"
+         "      reached before the program terminates.\n\n" : "",
+         DMS(mem_limit << 20), mem_limit - 1);
+
+  }
 
   FATAL("Compiler--Fork server handshake failed");
 
@@ -2485,6 +2697,7 @@ static u8 run_target_compiler(char** argv, u32 timeout, s32 idx_compiler) {
   static u32 prev_timed_out = 0;
 
   int status = 0;
+  u32 tb4;
 
   child_timed_out = 0;
 
@@ -2492,7 +2705,7 @@ static u8 run_target_compiler(char** argv, u32 timeout, s32 idx_compiler) {
      must prevent any earlier operations from venturing into that
      territory. */
 
-  memset(trace_bits, 0, MAP_SIZE);
+  memset(diff_trace_bits[idx_compiler], 0, MAP_SIZE);
   MEM_BARRIER();
   
   s32 res;
@@ -2545,6 +2758,17 @@ static u8 run_target_compiler(char** argv, u32 timeout, s32 idx_compiler) {
 
   MEM_BARRIER();
 
+  tb4 = *(u32*)trace_bits;
+
+#ifdef WORD_SIZE_64
+  classify_counts((u64*)trace_bits);
+#else
+  classify_counts((u32*)trace_bits);
+#endif /* ^WORD_SIZE_64 */
+
+
+  /* Report outcome to caller. */
+
   if (WIFSIGNALED(status) && !stop_soon) {
 
     kill_signal = WTERMSIG(status);
@@ -2554,6 +2778,17 @@ static u8 run_target_compiler(char** argv, u32 timeout, s32 idx_compiler) {
     return FAULT_CRASH;
 
   }
+
+  /* A somewhat nasty hack for MSAN, which doesn't support abort_on_error and
+     must use a special exit code. */
+
+  if (uses_asan && WEXITSTATUS(status) == MSAN_ERROR) {
+    kill_signal = 0;
+    return FAULT_CRASH;
+  }
+
+  if ((dumb_mode == 1 || no_forkserver) && tb4 == EXEC_FAIL_SIG)
+    return FAULT_ERROR;
 
 
   /* Report outcome to caller. */
@@ -2574,6 +2809,7 @@ static u8 differential_compilers(char** argv, u32 timeout, void* mem, u32 len) {
   u8 is_unique_diff = 1;
 
   u8 fault;
+  u8 ret_fault;
   u8 all_to = 1; // all instances are timing out.
   
   if (flag_use_output) {
@@ -2593,8 +2829,8 @@ static u8 differential_compilers(char** argv, u32 timeout, void* mem, u32 len) {
 
   write_to_testcase(mem, len);
 
-  fault = run_target_compiler(argv, timeout, 0);
-  if (fault != FAULT_TMOUT) all_to = 0;
+  ret_fault = run_target(argv, timeout);
+  if (ret_fault != FAULT_TMOUT) all_to = 0;
 
   lseek(dev_stdout_fd[0], 0, SEEK_SET);
   lseek(dev_stderr_fd[0], 0, SEEK_SET);
@@ -2634,14 +2870,14 @@ static u8 differential_compilers(char** argv, u32 timeout, void* mem, u32 len) {
     }
   }
 
-  if (all_to) return 0;
+  if (all_to) return ret_fault;
 
 
   if (keep_as_diff) {
     total_diff_compiler++;
 
-    write_to_testcase(mem, len);
-    run_target(argv, timeout);
+    // write_to_testcase(mem, len);
+    // run_target(argv, timeout);
     #ifdef WORD_SIZE_64
       simplify_trace((u64*)trace_bits);
     #else
@@ -2659,9 +2895,10 @@ static u8 differential_compilers(char** argv, u32 timeout, void* mem, u32 len) {
     close(fd);
     ck_free(fn);
     unique_diff_compiler++;
+    return FAULT_DIFF;
   }
 
-  return 0;
+  return ret_fault;
 }
 
 
@@ -2980,11 +3217,14 @@ static u8 calibrate_case(char** argv, struct queue_entry* q, u8* use_mem,
      count its spin-up time toward binary calibration. */
 
   if (dumb_mode != 1 && !no_forkserver && !forksrv_pid) {
-    init_forkserver(argv);
+    // init_forkserver(argv);
     for (int idx_com=0; idx_com < NUM_COM; idx_com++) {
       if (!forksrv_pid_compiler[idx_com])
         init_forkserver_compiler(argv, idx_com);
     }
+    forksrv_pid = forksrv_pid_compiler[0];
+    fsrv_ctl_fd = fsrv_ctl_fd_compiler[0];
+    fsrv_st_fd  = fsrv_st_fd_compiler[0];
   }
 
   differential_compilers(argv, use_tmout, use_mem, q->len);
@@ -3551,7 +3791,7 @@ static void write_crash_readme(void) {
 static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
 
   u8  *fn = "";
-  u8  hnb;
+  u8  hnb = 0;
   s32 fd;
   u8  keeping = 0, res;
 
@@ -3560,10 +3800,29 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
     /* Keep only if there are new bits in the map, add to queue for
        future fuzzing, etc. */
 
-    if (!(hnb = has_new_bits(virgin_bits))) {
+    // if (!(hnb = has_new_bits(virgin_bits))) {
+    //   if (crash_mode) total_crashes++;
+    //   return 0;
+    // }    
+    /* Keep when one of diff compilers has new bits in the map */
+    u8 diff_hnb[MAX_NUM_COM];
+    diff_hnb[0] = has_new_bits(virgin_bits);
+    hnb = diff_hnb[0] > hnb ? diff_hnb[0] : hnb;
+    for (int idx_com=1; idx_com < NUM_COM; idx_com++) {
+      diff_hnb[idx_com] = diff_has_new_bits(diff_virgin_bits[idx_com], diff_trace_bits[idx_com]);
+      hnb = diff_hnb[idx_com] > hnb ? diff_hnb[idx_com] : hnb;
+    }
+    if (!hnb) {
       if (crash_mode) total_crashes++;
       return 0;
-    }    
+    }
+    
+    fprintf(diff_log_file, "%06u, ", queued_paths);
+    for (int idx_com=0; idx_com < NUM_COM; idx_com++) {
+      fprintf(diff_log_file, "%u, ", diff_hnb[idx_com]);
+    }
+    fprintf(diff_log_file, "\n");
+
 
 #ifndef SIMPLE_FILES
 
@@ -5058,11 +5317,11 @@ EXP_ST u8 common_fuzz_stuff(char** argv, u8* out_buf, u32 len) {
     return 0;
   }
 
-  write_to_testcase(out_buf, len);
+  // write_to_testcase(out_buf, len);
 
-  differential_compilers(argv, exec_tmout, out_buf, len);
+  fault = differential_compilers(argv, exec_tmout, out_buf, len);
 
-  fault = run_target(argv, exec_tmout);
+  // fault = run_target(argv, exec_tmout);
 
   if (stop_soon) return 1;
 
@@ -5087,6 +5346,7 @@ EXP_ST u8 common_fuzz_stuff(char** argv, u8* out_buf, u32 len) {
   }
 
   /* This handles FAULT_ERROR for us: */
+  if (fault == FAULT_DIFF) return 0;
 
   queued_discovered += save_if_interesting(argv, out_buf, len, fault);
 
@@ -7293,7 +7553,7 @@ EXP_ST void check_binary(u8* fname) {
 
   if (strchr(fname, '/') || !(env_path = getenv("PATH"))) {
 
-    target_path = ck_strdup(fname);
+    target_path = alloc_printf("%s-0", fname);
     for (int idx_com=0; idx_com < NUM_COM; idx_com++) {
       target_path_compiler[idx_com] = alloc_printf("%s-%d", fname, idx_com);
     }
@@ -7318,14 +7578,14 @@ EXP_ST void check_binary(u8* fname) {
       env_path = delim;
 
       if (cur_elem[0]) {
-        target_path = alloc_printf("%s/%s", cur_elem, fname);
+        target_path = alloc_printf("%s/%s-0", cur_elem, fname);
         for (int idx_com=0; idx_com < NUM_COM; idx_com++) {
-          target_path_compiler[idx_com] = alloc_printf("%s/%s_%d", cur_elem, fname, idx_com);
+          target_path_compiler[idx_com] = alloc_printf("%s/%s-%d", cur_elem, fname, idx_com);
         }
       } else {
-        target_path = ck_strdup(fname);
+        target_path = alloc_printf("%s-0", fname);
         for (int idx_com=0; idx_com < NUM_COM; idx_com++) {
-          target_path_compiler[idx_com] = alloc_printf("%s_%d", fname, idx_com);
+          target_path_compiler[idx_com] = alloc_printf("%s-%d", fname, idx_com);
         }
       }
 
@@ -7397,7 +7657,7 @@ EXP_ST void check_binary(u8* fname) {
 #endif /* ^!__APPLE__ */
 
   if (!qemu_mode && !dumb_mode &&
-      !memmem(f_data, f_len, SHM_ENV_VAR, strlen(SHM_ENV_VAR) + 1)) {
+      !memmem(f_data, f_len, alloc_printf("%s_%d", SHM_ENV_VAR, 0), strlen(alloc_printf("%s_%d", SHM_ENV_VAR, 0)) + 1)) {
 
     SAYF("\n" cLRD "[-] " cRST
          "Looks like the target binary is not instrumented! The fuzzer depends on\n"
@@ -7697,6 +7957,15 @@ EXP_ST void setup_dirs_fds(void) {
                      "pending_total, pending_favs, map_size, unique_diffs, unique_crashes, "
                      "unique_hangs, max_depth, execs_per_sec\n");
                      /* ignore errors */
+  
+  /* diff_log: logging how many cov increased globally */
+  tmp = alloc_printf("%s/diff_cov", out_dir);
+  fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL, 0600);
+  if (fd < 0) PFATAL("Unable to create '%s'", tmp);
+  ck_free(tmp);
+
+  diff_log_file = fdopen(fd, "w");
+  if (!diff_log_file) PFATAL("fdopen() failed");
 
 }
 
@@ -8286,7 +8555,7 @@ int main(int argc, char** argv) {
 
       case 'c': /* @diff: number of compilers */
       if (sscanf(optarg, "%u", &NUM_COM) < 1 ||
-              optarg[0] == '-') FATAL("Bad syntax used for -m");
+              optarg[0] == '-') FATAL("Bad syntax used for -c");
         break;
 
       case 'i': /* input dir */
@@ -8671,6 +8940,7 @@ stop_fuzzing:
   }
 
   fclose(plot_file);
+  fclose(diff_log_file);
   destroy_queue();
   destroy_extras();
   ck_free(target_path);

@@ -7,7 +7,7 @@ if [ "$1" = "clean" ]; then
     exit 0
 fi
 
-forksrv=202
+forksrv=198
 id=0
 
 compiler_id=0
@@ -16,8 +16,13 @@ for _ in $(seq 1 `jq "[.][0] | length" config`); do
         export DIFF_CC=`jq "[.][0][${compiler_id}].CC" config`
         export DIFF_CXX=`jq "[.][0][${compiler_id}].CXX" config`
         export DIFF_ID=${id}
-        printf "#define FORKSRV_FD ${forksrv} \n #define DIFF_ID ${DIFF_ID} \n #define DIFF_CC ${DIFF_CC} \n #define DIFF_CXX ${DIFF_CXX} \n #define DIFF_CONFIG ${config} " > ./compiler-base/diff-config.h
-        make
+        if [[ ${DIFF_CC}} == *"clang"* ]]; then
+            printf "#define FORKSRV_FD ${forksrv} \n #define DIFF_ID ${DIFF_ID} \n #define DIFF_CC ${DIFF_CC} \n #define DIFF_CXX ${DIFF_CXX} \n #define DIFF_CONFIG ${config} \n #define DIFF_SHM_ENV_VAR \"__AFL_SHM_ID_${DIFF_ID}\"" > ./llvm-base/diff-config.h
+            make llvm
+        else
+            printf "#define FORKSRV_FD ${forksrv} \n #define DIFF_ID ${DIFF_ID} \n #define DIFF_CC ${DIFF_CC} \n #define DIFF_CXX ${DIFF_CXX} \n #define DIFF_CONFIG ${config} \n #define DIFF_SHM_ENV_VAR \"__AFL_SHM_ID_${DIFF_ID}\"" > ./gcc-base/diff-config.h
+            make gcc
+        fi
         id=$((id+1))
         forksrv=$((forksrv+4))
     done

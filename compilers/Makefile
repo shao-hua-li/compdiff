@@ -41,9 +41,11 @@ ifeq "$(origin CC)" "default"
   CXX        = clang++
 endif
 
-PROGS      = ./diff-cc ./diff-llvm-rt.o
+PROGS_LLVM      = ./diff-llvm-rt.o ./diff-llvm
+PROGS_GCC      =  ./diff-as ./diff-gcc
 
-all: test_deps $(PROGS) test_build all_done
+llvm: test_deps $(PROGS_LLVM) test_build all_done
+gcc: test_deps $(PROGS_GCC) test_build all_done
 
 test_deps:
 ifndef DIFF_CC
@@ -63,16 +65,26 @@ endif
 	@echo "[+] All set and ready to build."
 
 
-./diff-cc: ./compiler-base/diff-cc.c | test_deps
+./diff-llvm: ./llvm-base/diff-cc.c | test_deps
 	$(CC) $(CFLAGS) $< -o diff-cc-$(DIFF_ID) $(LDFLAGS)
 	ln -sf diff-cc-$(DIFF_ID)  ./diff-cxx-$(DIFF_ID) 
 
-./diff-llvm-rt.o: ./compiler-base/diff-llvm-rt.o.c | test_deps
+./diff-llvm-rt.o: ./llvm-base/diff-llvm-rt.o.c | test_deps
 	$(CC) $(CFLAGS) -fPIC -c $< -o diff-llvm-rt-$(DIFF_ID).o
+
+./diff-as: ./gcc-base/diff-as.c ./gcc-base/diff-as.h | test_deps
+	rm -rf ./diff-as-$(DIFF_ID)
+	mkdir ./diff-as-$(DIFF_ID)
+	$(CC) $(CFLAGS) $< -o ./diff-as-$(DIFF_ID)/as $(LDFLAGS)
+
+./diff-gcc: ./gcc-base/diff-cc.c | test_deps
+	$(CC) $(CFLAGS) $< -o diff-cc-$(DIFF_ID) $(LDFLAGS)
+	ln -sf diff-cc-$(DIFF_ID)  ./diff-cxx-$(DIFF_ID) 
+
 
 test_build: $(PROGS)
 	@echo "[*] Testing the CC wrapper and instrumentation output..."
-	unset AFL_USE_ASAN AFL_USE_MSAN AFL_INST_RATIO; ./diff-cc-$(DIFF_ID) $(CFLAGS) ./compiler-base/test-instr.c -o ./compiler-base/test-instr $(LDFLAGS)
+	unset AFL_USE_ASAN AFL_USE_MSAN AFL_INST_RATIO; ./diff-cc-$(DIFF_ID) $(CFLAGS) ./llvm-base/test-instr.c -o ./llvm-base/test-instr $(LDFLAGS)
 # Use /dev/null to avoid problems with optimization messing up expected
 # branches. See https://github.com/google/AFL/issues/30.
 	@echo "[+] All right, the instrumentation seems to be working!"
@@ -83,5 +95,5 @@ all_done: test_build
 .NOTPARALLEL: clean
 
 clean:
-	rm -f *.o *.so *~ a.out core core.[1-9][0-9]* ./compiler-base/test-instr ./compiler-base/.test-instr0 ./compiler-base/.test-instr1 
-	rm -f ./diff-cc-* ./diff-cxx-* ./diff-llvm-rt-*
+	rm -f *.o *.so *~ a.out core core.[1-9][0-9]* ./llvm-base/test-instr ./llvm-base/.test-instr0 ./llvm-base/.test-instr1 
+	rm -rf ./diff-cc-* ./diff-cxx-* ./diff-llvm-rt-* ./diff-as-*
