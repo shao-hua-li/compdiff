@@ -191,7 +191,7 @@ int main(int argc, char **argv) {
   LLVMFuzzerTestOneInput(dummy_input, 1);
 
   int num_runs = 0;
-  while (__afl_persistent_loop(N)) {
+  // while (__afl_persistent_loop(N)) { // disable persistent loop since gcc doesn't support it yet.
     ssize_t n_read = read(0, AflInputBuf, kMaxAflInputSize);
     if (n_read > 0) {
       // Copy AflInputBuf into a separate buffer to let asan find buffer
@@ -202,5 +202,5 @@ int main(int argc, char **argv) {
       LLVMFuzzerTestOneInput(copy, n_read);
       delete[] copy;
     }
-  }
+  // }
 }
