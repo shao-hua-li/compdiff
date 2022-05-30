@@ -2866,7 +2866,6 @@ static u8 differential_compilers(char** argv, u32 timeout, void* mem, u32 len) {
 
     if (strncmp(cksum_out, first_cksum_out, MD5_DIGEST_LENGTH) != 0) {
       keep_as_diff = 1; 
-      break;
     }
   }
 
@@ -4194,6 +4193,13 @@ static void maybe_update_plot_file(double bitmap_cvg, double eps) {
           get_cur_time() / 1000, queue_cycle - 1, current_entry, queued_paths,
           pending_not_fuzzed, pending_favored, bitmap_cvg, unique_diff_compiler,
           unique_crashes, unique_hangs, max_depth, eps); /* ignore errors */
+  
+  for(int idx_com=1; idx_com<NUM_COM; idx_com++) {
+    u32 t_bytes = count_non_255_bytes(diff_virgin_bits[idx_com]);
+    double t_byte_ratio = ((double)t_bytes * 100) / MAP_SIZE;
+    fprintf(plot_file, "%0.02f%%, ", t_byte_ratio);
+  }
+  fprintf(plot_file, "\n");
 
   fflush(plot_file);
 
