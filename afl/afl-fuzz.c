@@ -2758,10 +2758,10 @@ static u8 run_target_compiler(char** argv, u32 timeout, s32 idx_compiler) {
 
   MEM_BARRIER();
 
-  tb4 = *(u32*)trace_bits;
+  tb4 = *(u32*)diff_trace_bits[idx_compiler];
 
 #ifdef WORD_SIZE_64
-  classify_counts((u64*)trace_bits);
+  classify_counts((u64*)diff_trace_bits[idx_compiler]);
 #else
   classify_counts((u32*)trace_bits);
 #endif /* ^WORD_SIZE_64 */
