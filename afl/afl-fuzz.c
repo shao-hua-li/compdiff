@@ -4194,9 +4194,12 @@ static void maybe_update_plot_file(double bitmap_cvg, double eps) {
           pending_not_fuzzed, pending_favored, bitmap_cvg, unique_diff_compiler,
           unique_crashes, unique_hangs, max_depth, eps); /* ignore errors */
   
+  u32 t_bytes = count_non_255_bytes(virgin_bits);
+  double t_byte_ratio = ((double)t_bytes * 100) / MAP_SIZE;
+  fprintf(plot_file, "%0.02f%%, ", t_byte_ratio);
   for(int idx_com=1; idx_com<NUM_COM; idx_com++) {
-    u32 t_bytes = count_non_255_bytes(diff_virgin_bits[idx_com]);
-    double t_byte_ratio = ((double)t_bytes * 100) / MAP_SIZE;
+    t_bytes = count_non_255_bytes(diff_virgin_bits[idx_com]);
+    t_byte_ratio = ((double)t_bytes * 100) / MAP_SIZE;
     fprintf(plot_file, "%0.02f%%, ", t_byte_ratio);
   }
   fprintf(plot_file, "\n");
