@@ -2830,7 +2830,7 @@ static u8 differential_compilers(char** argv, u32 timeout, void* mem, u32 len) {
   write_to_testcase(mem, len);
 
   ret_fault = run_target(argv, timeout);
-  if (ret_fault != FAULT_TMOUT) all_to = 0;
+  if (ret_fault == FAULT_TMOUT) return FAULT_TMOUT;
 
   lseek(dev_stdout_fd[0], 0, SEEK_SET);
   lseek(dev_stderr_fd[0], 0, SEEK_SET);
@@ -2850,7 +2850,7 @@ static u8 differential_compilers(char** argv, u32 timeout, void* mem, u32 len) {
   for (int idx_com=1; idx_com < NUM_COM; idx_com++) {
     write_to_testcase(mem, len);
     fault = run_target_compiler(argv, timeout, idx_com);
-    if (fault != FAULT_TMOUT) all_to = 0;
+    if (fault == FAULT_TMOUT) return FAULT_;
     lseek(dev_stdout_fd[idx_com], 0, SEEK_SET);
     lseek(dev_stderr_fd[idx_com], 0, SEEK_SET);
 
@@ -2869,31 +2869,8 @@ static u8 differential_compilers(char** argv, u32 timeout, void* mem, u32 len) {
     }
   }
 
-  if (all_to) return ret_fault;
-
 
   if (keep_as_diff) {
-    total_diff_compiler++;
-
-    // write_to_testcase(mem, len);
-    // run_target(argv, timeout);
-    #ifdef WORD_SIZE_64
-      simplify_trace((u64*)trace_bits);
-    #else
-      simplify_trace((u32*)trace_bits);
-    #endif /* ^WORD_SIZE_64 */
-      if (!has_new_bits(virgin_diff)) return 0;;
-
-    u8  *fn = "";
-    s32 fd;
-    
-    fn = alloc_printf("%s/diffs/id:%06llu,%s", out_dir, unique_diff_compiler, describe_op(0));
-    fd = open(fn, O_WRONLY | O_CREAT | O_EXCL, 0600);
-    if (fd < 0) PFATAL("Unable to create '%s'", fn);
-    ck_write(fd, mem, len, fn);
-    close(fd);
-    ck_free(fn);
-    unique_diff_compiler++;
     return FAULT_DIFF;
   }
 
@@ -3227,6 +3204,9 @@ static u8 calibrate_case(char** argv, struct queue_entry* q, u8* use_mem,
   }
 
   differential_compilers(argv, use_tmout, use_mem, q->len);
+  for(int idx_com=1; idx_com < NUM_COM; idx_com++) {
+    hnb = diff_has_new_bits(diff_virgin_bits[idx_com], diff_trace_bits[idx_com]);
+  }
 
   if (q->exec_cksum) {
 
@@ -3968,6 +3948,30 @@ keep_as_crash:
       last_crash_time = get_cur_time();
       last_crash_execs = total_execs;
 
+      break;
+    
+    case FAULT_DIFF:
+      total_diff_compiler++;
+
+      // write_to_testcase(mem, len);
+      // run_target(argv, timeout);
+      #ifdef WORD_SIZE_64
+        simplify_trace((u64*)trace_bits);
+      #else
+        simplify_trace((u32*)trace_bits);
+      #endif /* ^WORD_SIZE_64 */
+        if (!has_new_bits(virgin_diff)) return keeping;
+
+      // u8  *fn = "";
+      // s32 fd;
+      
+      fn = alloc_printf("%s/diffs/id:%06llu,%s", out_dir, unique_diff_compiler, describe_op(0));
+      // fd = open(fn, O_WRONLY | O_CREAT | O_EXCL, 0600);
+      // if (fd < 0) PFATAL("Unable to create '%s'", fn);
+      // ck_write(fd, mem, len, fn);
+      // close(fd);
+      // ck_free(fn);
+      unique_diff_compiler++;
       break;
 
     case FAULT_ERROR: FATAL("Unable to execute target application");
@@ -5355,7 +5359,6 @@ EXP_ST u8 common_fuzz_stuff(char** argv, u8* out_buf, u32 len) {
   }
 
   /* This handles FAULT_ERROR for us: */
-  if (fault == FAULT_DIFF) return 0;
 
   queued_discovered += save_if_interesting(argv, out_buf, len, fault);
 

@@ -19,7 +19,7 @@ CC=clang AFL_TRACE_PC=1 make clean
 CC=clang AFL_TRACE_PC=1 make -j $(nproc)
 cd ..
 
-"./afl-clang-fast++" $CXXFLAGS -std=c++11 -c "afl_driver.cpp" -fPIC -o "./afl_driver.o"
+clang $CXXFLAGS -std=c++11 -c "afl_driver.cpp" -fPIC -o "./afl_driver.o"
 cd ..
 
 cd "./compilers"

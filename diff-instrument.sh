@@ -7,12 +7,13 @@ if [ -z $1 ]; then
 fi
 
 COMDIFFDIR=$(dirname $(realpath "$0"))
+export LIBS="${COMDIFFDIR}/afl/afl_driver.o"
 # firstly, build fuzz binary
-export compiler_nm=fuzz
-unset DIFF_ID
-export CC=${COMDIFFDIR}/afl/afl-clang-fast
-export CXX=${COMDIFFDIR}/afl/afl-clang-fast++
-source $1
+#export compiler_nm=fuzz
+#unset DIFF_ID
+#export CC=${COMDIFFDIR}/afl/afl-clang-fast
+#export CXX=${COMDIFFDIR}/afl/afl-clang-fast++
+#source $1
 
 # secondly, build binaries with different opt flags
 id=0
