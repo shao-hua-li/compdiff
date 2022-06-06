@@ -2850,7 +2850,7 @@ static u8 differential_compilers(char** argv, u32 timeout, void* mem, u32 len) {
   for (int idx_com=1; idx_com < NUM_COM; idx_com++) {
     write_to_testcase(mem, len);
     fault = run_target_compiler(argv, timeout, idx_com);
-    if (fault == FAULT_TMOUT) return FAULT_;
+    if (fault == FAULT_TMOUT) return FAULT_TMOUT;
     lseek(dev_stdout_fd[idx_com], 0, SEEK_SET);
     lseek(dev_stderr_fd[idx_com], 0, SEEK_SET);
 
