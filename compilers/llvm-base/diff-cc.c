@@ -124,6 +124,7 @@ static void edit_params(u32 argc, char** argv) {
 
   }
 
+  cc_params[cc_par_cnt++] = "-Wno-unused-command-line-argument";
   u8* diff_config = DIFF_CONFIG;
 
   if(!diff_config) {
